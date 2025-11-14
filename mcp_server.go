@@ -59,9 +59,45 @@ type LikeFeedArgs struct {
 
 // FavoriteFeedArgs 收藏参数
 type FavoriteFeedArgs struct {
-	FeedID    string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
-	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
+	FeedID     string `json:"feed_id" jsonschema:"小红书笔记ID，从Feed列表获取"`
+	XsecToken  string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
 	Unfavorite bool   `json:"unfavorite,omitempty" jsonschema:"是否取消收藏，true为取消收藏，false或未设置则为收藏"`
+}
+
+// DownloadImagesArgs 下载图片参数
+type DownloadImagesArgs struct {
+	Images  []string `json:"images" jsonschema:"要下载的图片URL列表，支持http/https；也可传本地路径将直接返回"`
+	SaveDir string   `json:"save_dir,omitempty" jsonschema:"可选参数，指定保存图片的文件夹路径。如果不传，则使用默认目录 image_file"`
+}
+
+// TextToImageArgs 文生图参数
+type TextToImageArgs struct {
+	Prompt string `json:"prompt" jsonschema:"用于生成图像的提示词，中英文均可输入"`
+	Width  int    `json:"width,omitempty" jsonschema:"生成图像的宽度，默认值：512，取值范围：[256, 768]"`
+	Height int    `json:"height,omitempty" jsonschema:"生成图像的高度，默认值：512，取值范围：[256, 768]"`
+}
+
+// ImageToImageArgs 图生图参数
+type ImageToImageArgs struct {
+	Prompt    string  `json:"prompt" jsonschema:"用于生成图像的提示词，中英文均可输入"`
+	ImagePath string  `json:"image_path" jsonschema:"参考图片的本地文件路径（绝对路径），如：/Users/user/image.jpg"`
+	Width     int     `json:"width,omitempty" jsonschema:"生成图像的宽度，默认值：512，取值范围：[256, 768]"`
+	Height    int     `json:"height,omitempty" jsonschema:"生成图像的高度，默认值：512，取值范围：[256, 768]"`
+	Strength  float64 `json:"strength,omitempty" jsonschema:"控制参考图片的影响强度，默认值：0.8，取值范围：[0.1, 1.0]，值越大参考图片影响越强"`
+}
+
+// GenerateCoverImageArgs 生成封面图片参数
+type GenerateCoverImageArgs struct {
+	Text            string `json:"text" jsonschema:"要显示在封面上的文字内容"`
+	Width           int    `json:"width,omitempty" jsonschema:"图片宽度，默认值：1080"`
+	Height          int    `json:"height,omitempty" jsonschema:"图片高度，默认值：1440"`
+	FontSize        int    `json:"font_size,omitempty" jsonschema:"字体大小，默认值：48"`
+	TextColor       string `json:"text_color,omitempty" jsonschema:"文字颜色，十六进制格式，如：#FFFFFF，默认白色"`
+	BgColor         string `json:"bg_color,omitempty" jsonschema:"背景颜色，十六进制格式，如：#667eea，默认随机渐变"`
+	Style           string `json:"style,omitempty" jsonschema:"背景样式：gradient（渐变，默认）、solid（纯色）、pattern（图案）"`
+	BackgroundImage string `json:"background_image,omitempty" jsonschema:"背景图片路径，如果设置则使用背景图替代纯色或渐变，图片宽高将等比例缩放（最大1080）"`
+	TextOffsetY     int    `json:"text_offset_y,omitempty" jsonschema:"文字垂直偏移值（像素），默认值：0（居中），正值向下偏移，负值向上偏移"`
+	OutputPath      string `json:"output_path,omitempty" jsonschema:"输出文件路径，如不指定则自动生成"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -92,7 +128,20 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Description: "检查小红书登录状态",
 		},
 		func(ctx context.Context, req *mcp.CallToolRequest, _ any) (*mcp.CallToolResult, any, error) {
-			result := appServer.handleCheckLoginStatus(ctx)
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				result = appServer.handleCheckLoginStatus(ctx)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "检查登录状态失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
 			return convertToMCPResult(result), nil, nil
 		},
 	)
@@ -116,14 +165,27 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Description: "发布小红书图文内容",
 		},
 		func(ctx context.Context, req *mcp.CallToolRequest, args PublishContentArgs) (*mcp.CallToolResult, any, error) {
-			// 转换参数格式到现有的 handler
-			argsMap := map[string]interface{}{
-				"title":   args.Title,
-				"content": args.Content,
-				"images":  convertStringsToInterfaces(args.Images),
-				"tags":    convertStringsToInterfaces(args.Tags),
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				// 转换参数格式到现有的 handler
+				argsMap := map[string]interface{}{
+					"title":   args.Title,
+					"content": args.Content,
+					"images":  convertStringsToInterfaces(args.Images),
+					"tags":    convertStringsToInterfaces(args.Tags),
+				}
+				result = appServer.handlePublishContent(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "发布内容失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
 			}
-			result := appServer.handlePublishContent(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		},
 	)
@@ -147,10 +209,23 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			Description: "搜索小红书内容（需要已登录）",
 		},
 		func(ctx context.Context, req *mcp.CallToolRequest, args SearchFeedsArgs) (*mcp.CallToolResult, any, error) {
-			argsMap := map[string]interface{}{
-				"keyword": args.Keyword,
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]interface{}{
+					"keyword": args.Keyword,
+				}
+				result = appServer.handleSearchFeeds(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "搜索内容失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
 			}
-			result := appServer.handleSearchFeeds(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil
 		},
 	)
@@ -256,7 +331,131 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 	)
 
-	logrus.Infof("Registered %d MCP tools", 11)
+	// 工具 12: 下载并保存图片
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "download_images",
+			Description: "下载并保存图片到本地（支持URL或本地路径混合输入，返回保存路径）",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args DownloadImagesArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]any{
+					"images":   convertStringsToInterfaces(args.Images),
+					"save_dir": args.SaveDir,
+				}
+				result = appServer.handleDownloadImages(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "下载失败: " + err.Error()}}, IsError: true}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 13: 文生图
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "text_to_image",
+			Description: "使用即梦AI生成图片，根据文本提示词生成高质量图像",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args TextToImageArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]interface{}{
+					"prompt": args.Prompt,
+					"width":  args.Width,
+					"height": args.Height,
+				}
+				result = appServer.handleTextToImage(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "文生图失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 14: 图生图
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "image_to_image",
+			Description: "使用即梦AI进行图生图，基于参考图片和文本提示词生成新的图像（自动处理异步任务）",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args ImageToImageArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]interface{}{
+					"prompt":     args.Prompt,
+					"image_path": args.ImagePath,
+					"width":      args.Width,
+					"height":     args.Height,
+					"strength":   args.Strength,
+				}
+				result = appServer.handleImageToImage(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "图生图失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 15: 生成封面图片
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "generate_cover_image",
+			Description: "生成带文字的封面图片，支持多种背景样式和自定义参数，适用于小红书封面、海报等场景",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args GenerateCoverImageArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				logrus.Infof("MCP工具调用: font_size=%d", args.FontSize)
+				argsMap := map[string]interface{}{
+					"text":             args.Text,
+					"width":            args.Width,
+					"height":           args.Height,
+					"font_size":        args.FontSize,
+					"text_color":       args.TextColor,
+					"bg_color":         args.BgColor,
+					"style":            args.Style,
+					"background_image": args.BackgroundImage,
+					"text_offset_y":    args.TextOffsetY,
+					"output_path":      args.OutputPath,
+				}
+				logrus.Infof("MCP参数映射: %+v", argsMap)
+				result = appServer.handleGenerateCoverImage(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "生成封面图片失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	logrus.Infof("Registered %d MCP tools", 15)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

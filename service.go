@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"time"
+
 	"github.com/go-rod/rod"
 	"github.com/mattn/go-runewidth"
 	"github.com/sirupsen/logrus"
@@ -13,8 +16,6 @@ import (
 	"github.com/xpzouying/xiaohongshu-mcp/cookies"
 	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
 	"github.com/xpzouying/xiaohongshu-mcp/xiaohongshu"
-	"os"
-	"time"
 )
 
 // XiaohongshuService 小红书业务服务
@@ -83,6 +84,12 @@ type UserProfileResponse struct {
 	UserBasicInfo xiaohongshu.UserBasicInfo      `json:"userBasicInfo"`
 	Interactions  []xiaohongshu.UserInteractions `json:"interactions"`
 	Feeds         []xiaohongshu.Feed             `json:"feeds"`
+}
+
+// DownloadImagesResponse 图片下载响应
+type DownloadImagesResponse struct {
+	SavedPaths []string `json:"saved_paths"`
+	Count      int      `json:"count"`
 }
 
 // CheckLoginStatus 检查登录状态
@@ -158,46 +165,76 @@ func (s *XiaohongshuService) GetLoginQrcode(ctx context.Context) (*LoginQrcodeRe
 
 // PublishContent 发布内容
 func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishRequest) (*PublishResponse, error) {
-	// 验证标题长度
-	// 小红书限制：最大40个单位长度
-	// 中文/日文/韩文占2个单位，英文/数字占1个单位
-	if titleWidth := runewidth.StringWidth(req.Title); titleWidth > 40 {
-		return nil, fmt.Errorf("标题长度超过限制")
-	}
+	return panicRecoveryWrapperWithResult(func() (*PublishResponse, error) {
+		// 验证标题长度
+		// 小红书限制：最大40个单位长度
+		// 中文/日文/韩文占2个单位，英文/数字占1个单位
+		if titleWidth := runewidth.StringWidth(req.Title); titleWidth > 40 {
+			return nil, fmt.Errorf("标题长度超过限制")
+		}
 
-	// 处理图片：下载URL图片或使用本地路径
-	imagePaths, err := s.processImages(req.Images)
-	if err != nil {
-		return nil, err
-	}
+		// 处理图片：下载URL图片或使用本地路径
+		imagePaths, err := s.processImages(req.Images)
+		if err != nil {
+			return nil, err
+		}
 
-	// 构建发布内容
-	content := xiaohongshu.PublishImageContent{
-		Title:      req.Title,
-		Content:    req.Content,
-		Tags:       req.Tags,
-		ImagePaths: imagePaths,
-	}
+		// 构建发布内容
+		content := xiaohongshu.PublishImageContent{
+			Title:      req.Title,
+			Content:    req.Content,
+			Tags:       req.Tags,
+			ImagePaths: imagePaths,
+		}
 
-	// 执行发布
-	if err := s.publishContent(ctx, content); err != nil {
-		return nil, err
-	}
+		// 执行发布
+		if err := s.publishContent(ctx, content); err != nil {
+			return nil, err
+		}
 
-	response := &PublishResponse{
-		Title:   req.Title,
-		Content: req.Content,
-		Images:  len(imagePaths),
-		Status:  "发布完成",
-	}
+		response := &PublishResponse{
+			Title:   req.Title,
+			Content: req.Content,
+			Images:  len(imagePaths),
+			Status:  "发布完成",
+		}
 
-	return response, nil
+		return response, nil
+	})
 }
 
 // processImages 处理图片列表，支持URL下载和本地路径
 func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
 	processor := downloader.NewImageProcessor()
 	return processor.ProcessImages(images)
+}
+
+// DownloadImages 下载并保存图片，返回本地保存路径
+func (s *XiaohongshuService) DownloadImages(ctx context.Context, images []string, saveDir string) (*DownloadImagesResponse, error) {
+	if len(images) == 0 {
+		return nil, fmt.Errorf("no images provided")
+	}
+
+	// 确定保存目录
+	targetDir := saveDir
+	if targetDir == "" {
+		// 使用默认目录：服务器根目录下的 image_file 文件夹
+		targetDir = "image_file"
+	}
+
+	// 确保目录存在
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create save directory %s: %w", targetDir, err)
+	}
+
+	// 创建使用指定目录的图片处理器
+	processor := downloader.NewImageProcessorWithDir(targetDir)
+	localPaths, err := processor.ProcessImages(images)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DownloadImagesResponse{SavedPaths: localPaths, Count: len(localPaths)}, nil
 }
 
 // publishContent 执行内容发布
@@ -296,50 +333,66 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string) (*FeedsListResponse, error) {
-	b := newBrowser()
-	defer b.Close()
+	return panicRecoveryWrapperWithResult(func() (*FeedsListResponse, error) {
+		b := newBrowser()
+		defer b.Close()
 
-	page := b.NewPage()
-	defer page.Close()
+		page := b.NewPage()
+		defer page.Close()
 
-	action := xiaohongshu.NewSearchAction(page)
+		action := xiaohongshu.NewSearchAction(page)
 
-	feeds, err := action.Search(ctx, keyword)
-	if err != nil {
-		return nil, err
-	}
+		feeds, err := action.Search(ctx, keyword)
+		if err != nil {
+			return nil, err
+		}
 
-	response := &FeedsListResponse{
-		Feeds: feeds,
-		Count: len(feeds),
-	}
+		response := &FeedsListResponse{
+			Feeds: feeds,
+			Count: len(feeds),
+		}
 
-	return response, nil
+		return response, nil
+	})
 }
 
 // GetFeedDetail 获取Feed详情
 func (s *XiaohongshuService) GetFeedDetail(ctx context.Context, feedID, xsecToken string) (*FeedDetailResponse, error) {
-	b := newBrowser()
-	defer b.Close()
+	// 使用 panic 恢复包装器，确保不会因为 panic 导致程序崩溃
+	return panicRecoveryWrapperWithResult(func() (*FeedDetailResponse, error) {
+		b := newBrowser()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("GetFeedDetail: 关闭浏览器时发生 panic: %v", r)
+			}
+			b.Close()
+		}()
 
-	page := b.NewPage()
-	defer page.Close()
+		page := b.NewPage()
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("GetFeedDetail: 关闭页面时发生 panic: %v", r)
+			}
+			page.Close()
+		}()
 
-	// 创建 Feed 详情 action
-	action := xiaohongshu.NewFeedDetailAction(page)
+		// 创建 Feed 详情 action
+		action := xiaohongshu.NewFeedDetailAction(page)
 
-	// 获取 Feed 详情
-	result, err := action.GetFeedDetail(ctx, feedID, xsecToken)
-	if err != nil {
-		return nil, err
-	}
+		// 获取 Feed 详情
+		result, err := action.GetFeedDetail(ctx, feedID, xsecToken)
+		if err != nil {
+			logrus.Errorf("GetFeedDetail: 获取 Feed 详情失败: %v", err)
+			return nil, err
+		}
 
-	response := &FeedDetailResponse{
-		FeedID: feedID,
-		Data:   result,
-	}
+		response := &FeedDetailResponse{
+			FeedID: feedID,
+			Data:   result,
+		}
 
-	return response, nil
+		return response, nil
+	})
 }
 
 // UserProfile 获取用户信息

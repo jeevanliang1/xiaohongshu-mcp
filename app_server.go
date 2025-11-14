@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -44,7 +45,35 @@ func (s *AppServer) Start(port string) error {
 
 	// 启动服务器的 goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logrus.Errorf("HTTP服务器goroutine发生panic: %v", r)
+				// 不退出程序，而是尝试重启服务器
+				logrus.Info("尝试重启HTTP服务器...")
+				time.Sleep(5 * time.Second)
+				go func() {
+					if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+						logrus.Errorf("服务器重启失败: %v", err)
+					}
+				}()
+			}
+		}()
+
 		logrus.Infof("启动 HTTP 服务器: %s", port)
+		logrus.Infof("MCP 服务地址: http://%s/mcp", port)
+
+		// 显示局域网访问地址
+		if port == "0.0.0.0:18060" || (len(port) > 0 && port[0] == ':') {
+			// 如果绑定到所有接口或端口以冒号开头，显示局域网访问地址
+			localIP := getLocalIP()
+			if port[0] == ':' {
+				logrus.Infof("局域网访问地址: http://%s%s/mcp", localIP, port)
+			} else {
+				// 提取端口号
+				portOnly := port[strings.LastIndex(port, ":")+1:]
+				logrus.Infof("局域网访问地址: http://%s:%s/mcp", localIP, portOnly)
+			}
+		}
 		if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logrus.Errorf("服务器启动失败: %v", err)
 			os.Exit(1)

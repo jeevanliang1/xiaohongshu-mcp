@@ -18,6 +18,13 @@ func NewImageProcessor() *ImageProcessor {
 	}
 }
 
+// NewImageProcessorWithDir 创建使用指定目录的图片处理器
+func NewImageProcessorWithDir(saveDir string) *ImageProcessor {
+	return &ImageProcessor{
+		downloader: NewImageDownloader(saveDir),
+	}
+}
+
 // ProcessImages 处理图片列表，返回本地文件路径
 // 支持两种输入格式：
 // 1. URL格式 (http/https开头) - 自动下载到本地

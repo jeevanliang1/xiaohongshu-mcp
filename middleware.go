@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -31,4 +32,28 @@ func errorHandlingMiddleware() gin.HandlerFunc {
 		respondError(c, http.StatusInternalServerError, "INTERNAL_ERROR",
 			"服务器内部错误", recovered)
 	})
+}
+
+// panicRecoveryWrapper 包装函数，用于捕获panic并转换为错误
+func panicRecoveryWrapper(fn func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Errorf("捕获到panic: %v", r)
+			err = fmt.Errorf("操作失败，发生内部错误: %v", r)
+		}
+	}()
+
+	return fn()
+}
+
+// panicRecoveryWrapperWithResult 包装函数，用于捕获panic并返回错误结果
+func panicRecoveryWrapperWithResult[T any](fn func() (T, error)) (result T, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			logrus.Errorf("捕获到panic: %v", r)
+			err = fmt.Errorf("操作失败，发生内部错误: %v", r)
+		}
+	}()
+
+	return fn()
 }
