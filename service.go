@@ -28,10 +28,11 @@ func NewXiaohongshuService() *XiaohongshuService {
 
 // PublishRequest 发布请求
 type PublishRequest struct {
-	Title   string   `json:"title" binding:"required"`
-	Content string   `json:"content" binding:"required"`
-	Images  []string `json:"images" binding:"required,min=1"`
-	Tags    []string `json:"tags,omitempty"`
+	Title       string   `json:"title" binding:"required"`
+	Content     string   `json:"content" binding:"required"`
+	Images      []string `json:"images" binding:"required,min=1"`
+	Tags        []string `json:"tags,omitempty"`
+	AccessToken string   `json:"access_token,omitempty"` // 飞书访问令牌，仅在 images 包含 file_token 时使用
 }
 
 // LoginStatusResponse 登录状态响应
@@ -173,8 +174,8 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 			return nil, fmt.Errorf("标题长度超过限制")
 		}
 
-		// 处理图片：下载URL图片或使用本地路径
-		imagePaths, err := s.processImages(req.Images)
+		// 处理图片：下载URL图片、飞书图片或使用本地路径
+		imagePaths, err := s.processImages(req.Images, req.AccessToken)
 		if err != nil {
 			return nil, err
 		}
@@ -203,10 +204,10 @@ func (s *XiaohongshuService) PublishContent(ctx context.Context, req *PublishReq
 	})
 }
 
-// processImages 处理图片列表，支持URL下载和本地路径
-func (s *XiaohongshuService) processImages(images []string) ([]string, error) {
+// processImages 处理图片列表，支持URL下载、飞书file_token下载和本地路径
+func (s *XiaohongshuService) processImages(images []string, accessToken string) ([]string, error) {
 	processor := downloader.NewImageProcessor()
-	return processor.ProcessImages(images)
+	return processor.ProcessImagesWithFeishuToken(images, accessToken)
 }
 
 // DownloadImages 下载并保存图片，返回本地保存路径

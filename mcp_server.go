@@ -12,10 +12,11 @@ import (
 
 // PublishContentArgs 发布内容的参数
 type PublishContentArgs struct {
-	Title   string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
-	Content string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
-	Images  []string `json:"images" jsonschema:"图片路径列表（至少需要1张图片）。支持两种方式：1. HTTP/HTTPS图片链接（自动下载）；2. 本地图片绝对路径（推荐，如:/Users/user/image.jpg）"`
-	Tags    []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
+	Title       string   `json:"title" jsonschema:"内容标题（小红书限制：最多20个中文字或英文单词）"`
+	Content     string   `json:"content" jsonschema:"正文内容，不包含以#开头的标签内容，所有话题标签都用tags参数来生成和提供即可"`
+	Images      []string `json:"images" jsonschema:"图片路径列表（至少需要1张图片）。支持三种方式：1. HTTP/HTTPS图片链接（自动下载）；2. 本地图片绝对路径（推荐，如:/Users/user/image.jpg）；3. 飞书file_token（如:UI86b9N9JoKzr9xzxXVcoSWRnrd）"`
+	Tags        []string `json:"tags,omitempty" jsonschema:"话题标签列表（可选参数），如 [美食, 旅行, 生活]"`
+	AccessToken string   `json:"access_token,omitempty" jsonschema:"飞书访问令牌（可选参数），仅在images包含飞书file_token时需要提供，如:t-g104bnfxHJ3653P5R7BL3WJTKMOCGJQETBRF34KA"`
 }
 
 // PublishVideoArgs 发布视频的参数（仅支持本地单个视频文件）
@@ -70,6 +71,12 @@ type DownloadImagesArgs struct {
 	SaveDir string   `json:"save_dir,omitempty" jsonschema:"可选参数，指定保存图片的文件夹路径。如果不传，则使用默认目录 image_file"`
 }
 
+// TestFeishuDownloadArgs 测试飞书图片下载参数
+type TestFeishuDownloadArgs struct {
+	FileTokens  []string `json:"file_tokens" jsonschema:"飞书file_token列表，如: [UI86b9N9JoKzr9xzxXVcoSWRnrd]"`
+	AccessToken string   `json:"access_token" jsonschema:"飞书访问令牌，如:t-g104bnfxHJ3653P5R7BL3WJTKMOCGJQETBRF34KA"`
+}
+
 // TextToImageArgs 文生图参数
 type TextToImageArgs struct {
 	Prompt string `json:"prompt" jsonschema:"用于生成图像的提示词，中英文均可输入"`
@@ -98,6 +105,13 @@ type GenerateCoverImageArgs struct {
 	BackgroundImage string `json:"background_image,omitempty" jsonschema:"背景图片路径，如果设置则使用背景图替代纯色或渐变，图片宽高将等比例缩放（最大1080）"`
 	TextOffsetY     int    `json:"text_offset_y,omitempty" jsonschema:"文字垂直偏移值（像素），默认值：0（居中），正值向下偏移，负值向上偏移"`
 	OutputPath      string `json:"output_path,omitempty" jsonschema:"输出文件路径，如不指定则自动生成"`
+}
+
+// SaveBase64ImageArgs 保存Base64图片参数
+type SaveBase64ImageArgs struct {
+	Base64Data string `json:"base64_data" jsonschema:"Base64编码的图片数据（支持data:image/xxx;base64,前缀或纯Base64字符串）"`
+	OutputPath string `json:"output_path,omitempty" jsonschema:"可选参数，输出文件路径。如果不指定，将自动生成唯一文件名并保存到saved_images目录"`
+	Extension  string `json:"extension,omitempty" jsonschema:"可选参数，图片文件扩展名（如：png、jpg、jpeg），默认根据Base64数据自动检测，如果无法检测则使用png"`
 }
 
 // InitMCPServer 初始化 MCP Server
@@ -169,10 +183,11 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 			err := panicRecoveryWrapper(func() error {
 				// 转换参数格式到现有的 handler
 				argsMap := map[string]interface{}{
-					"title":   args.Title,
-					"content": args.Content,
-					"images":  convertStringsToInterfaces(args.Images),
-					"tags":    convertStringsToInterfaces(args.Tags),
+					"title":        args.Title,
+					"content":      args.Content,
+					"images":       convertStringsToInterfaces(args.Images),
+					"tags":         convertStringsToInterfaces(args.Tags),
+					"access_token": args.AccessToken,
 				}
 				result = appServer.handlePublishContent(ctx, argsMap)
 				return nil
@@ -455,7 +470,66 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 	)
 
-	logrus.Infof("Registered %d MCP tools", 15)
+	// 工具 16: 保存Base64图片
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "save_base64_image",
+			Description: "将Base64编码的图片数据保存为本地图片文件，并返回保存路径",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args SaveBase64ImageArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]interface{}{
+					"base64_data": args.Base64Data,
+					"output_path": args.OutputPath,
+					"extension":   args.Extension,
+				}
+				result = appServer.handleSaveBase64Image(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "保存Base64图片失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	// 工具 17: 测试飞书图片下载（仅用于测试）
+	mcp.AddTool(server,
+		&mcp.Tool{
+			Name:        "test_feishu_download",
+			Description: "测试飞书图片下载功能（仅用于测试验证）",
+		},
+		func(ctx context.Context, req *mcp.CallToolRequest, args TestFeishuDownloadArgs) (*mcp.CallToolResult, any, error) {
+			var result *MCPToolResult
+			err := panicRecoveryWrapper(func() error {
+				argsMap := map[string]interface{}{
+					"file_tokens":  convertStringsToInterfaces(args.FileTokens),
+					"access_token": args.AccessToken,
+				}
+				result = appServer.handleTestFeishuDownload(ctx, argsMap)
+				return nil
+			})
+			if err != nil {
+				result = &MCPToolResult{
+					Content: []MCPContent{{
+						Type: "text",
+						Text: "测试飞书下载失败: " + err.Error(),
+					}},
+					IsError: true,
+				}
+			}
+			return convertToMCPResult(result), nil, nil
+		},
+	)
+
+	logrus.Infof("Registered %d MCP tools", 17)
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

@@ -24,13 +24,15 @@ import (
 // ImageGenerator 图片生成器
 type ImageGenerator struct {
 	assetsDir string
-	mutex     sync.Mutex // 互斥锁，确保并发安全
+	mutex     sync.Mutex           // 互斥锁，确保并发安全
+	fontCache map[string]font.Face // 字体缓存，key: "fontPath_size"
 }
 
 // NewImageGenerator 创建图片生成器
 func NewImageGenerator(assetsDir string) *ImageGenerator {
 	return &ImageGenerator{
 		assetsDir: assetsDir,
+		fontCache: make(map[string]font.Face),
 	}
 }
 
@@ -107,10 +109,18 @@ func (ig *ImageGenerator) GenerateCoverImage(req *CoverImageRequest) (*CoverImag
 		req.Style = "gradient"
 	}
 
-	// 创建画布
+	// 创建画布，使用高质量渲染
 	dc := gg.NewContext(req.Width, req.Height)
+	// 启用抗锯齿以获得更平滑的渲染效果
+	dc.SetLineCap(gg.LineCapRound)
+	dc.SetLineJoin(gg.LineJoinRound)
 
-	// 绘制背景
+	// 先设置白色背景（如果没有背景图片，将使用白色背景）
+	dc.SetColor(color.RGBA{255, 255, 255, 255}) // 白色背景
+	dc.DrawRectangle(0, 0, float64(req.Width), float64(req.Height))
+	dc.Fill()
+
+	// 绘制背景（如果有背景图片或背景样式，会覆盖白色背景）
 	if err := ig.drawBackground(dc, req); err != nil {
 		return nil, fmt.Errorf("绘制背景失败: %v", err)
 	}
@@ -354,7 +364,34 @@ func (ig *ImageGenerator) drawImageBackground(dc *gg.Context, req *CoverImageReq
 	return nil
 }
 
-// drawText 绘制文字
+// isLightColor 判断颜色是否为浅色（基于亮度计算）
+// 使用相对亮度公式：0.299*R + 0.587*G + 0.114*B
+// 如果亮度 > 128，则认为是浅色
+func isLightColor(c color.Color) bool {
+	r, g, b, _ := c.RGBA()
+	// 将16位颜色值转换为8位
+	r8 := uint8(r >> 8)
+	g8 := uint8(g >> 8)
+	b8 := uint8(b >> 8)
+
+	// 计算相对亮度
+	brightness := 0.299*float64(r8) + 0.587*float64(g8) + 0.114*float64(b8)
+	return brightness > 128
+}
+
+// getStrokeColor 根据文字颜色智能选择描边颜色
+// 浅色文字用黑色描边，深色文字用白色描边
+func getStrokeColor(textColor color.Color) color.Color {
+	if isLightColor(textColor) {
+		// 浅色文字，使用黑色描边
+		return color.RGBA{0, 0, 0, 255}
+	} else {
+		// 深色文字，使用白色描边
+		return color.RGBA{255, 255, 255, 255}
+	}
+}
+
+// drawText 绘制文字（优化版本，支持高质量渲染）
 func (ig *ImageGenerator) drawText(dc *gg.Context, req *CoverImageRequest) error {
 	// 解析文字颜色
 	textColor, err := parseColor(req.TextColor)
@@ -365,7 +402,7 @@ func (ig *ImageGenerator) drawText(dc *gg.Context, req *CoverImageRequest) error
 	// 设置字体大小
 	logrus.Infof("drawText: 设置字体大小 %d", req.FontSize)
 
-	// 尝试加载支持emoji的字体
+	// 尝试加载支持emoji的字体（使用缓存）
 	fontFace := ig.loadEmojiSupportFont(req.FontSize)
 	if fontFace != nil {
 		dc.SetFontFace(fontFace)
@@ -379,7 +416,6 @@ func (ig *ImageGenerator) drawText(dc *gg.Context, req *CoverImageRequest) error
 			logrus.Warn("drawText: 字体设置失败，使用默认字体")
 		}
 	}
-	dc.SetColor(textColor)
 
 	// 设置padding
 	padding := 50.0
@@ -388,49 +424,81 @@ func (ig *ImageGenerator) drawText(dc *gg.Context, req *CoverImageRequest) error
 	// 处理换行符和自动换行
 	lines := ig.wrapText(dc, req.Text, availableWidth)
 
-	// 计算总文字高度
-	lineHeight := float64(req.FontSize) * 1.2 // 行高为字体大小的1.2倍
+	// 计算总文字高度（优化行间距）
+	lineHeight := float64(req.FontSize) * 1.4 // 增加行高为字体大小的1.4倍，提高可读性
 	totalTextHeight := float64(len(lines)) * lineHeight
 
 	// 计算文字区域位置（居中，然后应用垂直偏移）
-	textAreaX := float64(req.Width) / 2
 	textAreaY := float64(req.Height)/2 + float64(req.TextOffsetY)
 
-	// 绘制半透明背景框
-	boxWidth := availableWidth
-	boxHeight := totalTextHeight + 40 // 上下各加20的padding
-	boxX := textAreaX - boxWidth/2
-	boxY := textAreaY - boxHeight/2
+	// 根据文字颜色智能选择描边颜色
+	strokeColor := getStrokeColor(textColor)
 
-	// 确保背景框不会超出100像素的padding边界
-	if boxX < padding {
-		boxX = padding
-		boxWidth = float64(req.Width) - 2*padding
-	}
-	if boxY < padding {
-		boxY = padding
-	}
-	if boxX+boxWidth > float64(req.Width)-padding {
-		boxWidth = float64(req.Width) - 2*padding
-		boxX = padding
-	}
-	if boxY+boxHeight > float64(req.Height)-padding {
-		boxHeight = float64(req.Height) - 2*padding
-		boxY = padding
+	// 绘制文字行（左对齐，带智能描边效果）
+	textStartX := padding + 30 // 增加左边距到30像素
+	startY := textAreaY - totalTextHeight/2 + lineHeight/2
+
+	// 计算文字区域的边界，用于绘制背景
+	// 找到最长的行来计算背景宽度
+	maxLineWidth := 0.0
+	for _, line := range lines {
+		if line != "" {
+			width, _ := dc.MeasureString(line)
+			if width > maxLineWidth {
+				maxLineWidth = width
+			}
+		}
 	}
 
-	// 绘制圆角矩形背景
-	dc.SetColor(color.RGBA{0, 0, 0, 153}) // 黑色半透明
-	dc.DrawRoundedRectangle(boxX, boxY, boxWidth, boxHeight, 15)
+	// 背景矩形的参数
+	bgPadding := 20.0 // 背景内边距
+	bgX := textStartX - bgPadding
+	bgY := startY - lineHeight/2 - bgPadding
+	bgWidth := maxLineWidth + 2*bgPadding
+	bgHeight := totalTextHeight + 2*bgPadding
+
+	// 绘制50%透明度的黑色背景
+	dc.SetColor(color.RGBA{0, 0, 0, 128})                    // 128 = 50% 透明度 (255 * 0.5)
+	dc.DrawRoundedRectangle(bgX, bgY, bgWidth, bgHeight, 10) // 圆角矩形，圆角半径10
 	dc.Fill()
 
-	// 绘制文字行（左对齐）
-	dc.SetColor(textColor)
-	startY := textAreaY - totalTextHeight/2 + lineHeight/2
-	textStartX := padding + 20 // 左边距：padding + 20像素
 	for i, line := range lines {
+		if line == "" {
+			continue // 跳过空行
+		}
 		y := startY + float64(i)*lineHeight
-		dc.DrawStringAnchored(line, textStartX, y, 0, 0.5) // 左对齐：0, 0.5
+
+		// 绘制文字描边（使用圆形分布的多层绘制，实现平滑描边效果）
+		// 描边宽度：根据字体大小动态调整
+		strokeWidth := float64(req.FontSize) * 0.08 // 约为字体大小的8%
+		if strokeWidth < 2.0 {
+			strokeWidth = 2.0 // 最小2像素
+		}
+		if strokeWidth > 5.0 {
+			strokeWidth = 5.0 // 最大5像素
+		}
+
+		dc.SetColor(strokeColor)
+
+		// 使用圆形分布绘制描边，实现平滑效果
+		// 在多个半径和角度上绘制，形成平滑的圆形描边
+		numLayers := 3  // 3层描边，从内到外
+		numAngles := 16 // 每层16个角度，形成圆形分布
+
+		for layer := 1; layer <= numLayers; layer++ {
+			radius := strokeWidth * float64(layer) / float64(numLayers)
+			for angle := 0; angle < numAngles; angle++ {
+				// 计算角度（弧度）
+				rad := float64(angle) * 2.0 * math.Pi / float64(numAngles)
+				dx := radius * math.Cos(rad)
+				dy := radius * math.Sin(rad)
+				dc.DrawStringAnchored(line, textStartX+dx, y+dy, 0, 0.5)
+			}
+		}
+
+		// 绘制主文字（最后绘制，确保在最上层）
+		dc.SetColor(textColor)
+		dc.DrawStringAnchored(line, textStartX, y, 0, 0.5)
 	}
 
 	return nil
@@ -545,7 +613,7 @@ func (ig *ImageGenerator) isChinese(char string) bool {
 	return r >= 0x4e00 && r <= 0x9fff
 }
 
-// loadEmojiSupportFont 加载支持emoji的字体
+// loadEmojiSupportFont 加载支持emoji的字体（带缓存优化）
 func (ig *ImageGenerator) loadEmojiSupportFont(size int) font.Face {
 	// 优先使用支持中文和emoji的字体（按优先级排序）
 	emojiFonts := []string{
@@ -570,8 +638,21 @@ func (ig *ImageGenerator) loadEmojiSupportFont(size int) font.Face {
 	}
 
 	for _, fontPath := range emojiFonts {
+		// 检查缓存
+		cacheKey := fmt.Sprintf("%s_%d", fontPath, size)
+		ig.mutex.Lock()
+		if cached, exists := ig.fontCache[cacheKey]; exists {
+			ig.mutex.Unlock()
+			return cached
+		}
+		ig.mutex.Unlock()
+
 		if _, err := os.Stat(fontPath); err == nil {
 			if fontFace, err := gg.LoadFontFace(fontPath, float64(size)); err == nil {
+				// 缓存字体
+				ig.mutex.Lock()
+				ig.fontCache[cacheKey] = fontFace
+				ig.mutex.Unlock()
 				logrus.Infof("成功加载emoji支持字体: %s, 大小: %d", fontPath, size)
 				return fontFace
 			} else {
@@ -584,15 +665,28 @@ func (ig *ImageGenerator) loadEmojiSupportFont(size int) font.Face {
 	return nil
 }
 
-// getDefaultFontFace 获取默认字体
+// getDefaultFontFace 获取默认字体（带缓存优化）
 func (ig *ImageGenerator) getDefaultFontFace(size int) font.Face {
 	logrus.Infof("getDefaultFontFace: 请求字体大小 %d", size)
 
 	// 优先使用华文黑体，这是最可靠的中文字体
 	primaryFontPath := "/System/Library/Fonts/STHeiti Medium.ttc"
 
+	// 检查缓存
+	cacheKey := fmt.Sprintf("%s_%d", primaryFontPath, size)
+	ig.mutex.Lock()
+	if cached, exists := ig.fontCache[cacheKey]; exists {
+		ig.mutex.Unlock()
+		return cached
+	}
+	ig.mutex.Unlock()
+
 	if _, err := os.Stat(primaryFontPath); err == nil {
 		if fontFace, err := gg.LoadFontFace(primaryFontPath, float64(size)); err == nil {
+			// 缓存字体
+			ig.mutex.Lock()
+			ig.fontCache[cacheKey] = fontFace
+			ig.mutex.Unlock()
 			logrus.Infof("成功加载主字体: %s, 大小: %d", primaryFontPath, size)
 			return fontFace
 		} else {
@@ -620,8 +714,21 @@ func (ig *ImageGenerator) getDefaultFontFace(size int) font.Face {
 	}
 
 	for _, fontPath := range fontPaths {
+		// 检查缓存
+		cacheKey = fmt.Sprintf("%s_%d", fontPath, size)
+		ig.mutex.Lock()
+		if cached, exists := ig.fontCache[cacheKey]; exists {
+			ig.mutex.Unlock()
+			return cached
+		}
+		ig.mutex.Unlock()
+
 		if _, err := os.Stat(fontPath); err == nil {
 			if fontFace, err := gg.LoadFontFace(fontPath, float64(size)); err == nil {
+				// 缓存字体
+				ig.mutex.Lock()
+				ig.fontCache[cacheKey] = fontFace
+				ig.mutex.Unlock()
 				logrus.Infof("成功加载备用字体: %s, 大小: %d", fontPath, size)
 				return fontFace
 			} else {

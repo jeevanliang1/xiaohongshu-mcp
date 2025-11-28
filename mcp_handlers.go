@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"net"
 	"os"
 	"path/filepath"
@@ -13,6 +17,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/volcengine/volc-sdk-golang/service/visual"
+	"github.com/xpzouying/xiaohongshu-mcp/pkg/downloader"
 )
 
 // MCP 工具处理函数
@@ -123,6 +128,7 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 	content, _ := args["content"].(string)
 	imagePathsInterface, _ := args["images"].([]interface{})
 	tagsInterface, _ := args["tags"].([]interface{})
+	accessToken, _ := args["access_token"].(string)
 
 	var imagePaths []string
 	for _, path := range imagePathsInterface {
@@ -138,14 +144,15 @@ func (s *AppServer) handlePublishContent(ctx context.Context, args map[string]in
 		}
 	}
 
-	logrus.Infof("MCP: 发布内容 - 标题: %s, 图片数量: %d, 标签数量: %d", title, len(imagePaths), len(tags))
+	logrus.Infof("MCP: 发布内容 - 标题: %s, 图片数量: %d, 标签数量: %d, 是否有access_token: %v", title, len(imagePaths), len(tags), accessToken != "")
 
 	// 构建发布请求
 	req := &PublishRequest{
-		Title:   title,
-		Content: content,
-		Images:  imagePaths,
-		Tags:    tags,
+		Title:       title,
+		Content:     content,
+		Images:      imagePaths,
+		Tags:        tags,
+		AccessToken: accessToken,
 	}
 
 	// 执行发布
@@ -467,6 +474,83 @@ func (s *AppServer) handleDownloadImages(ctx context.Context, args map[string]an
 		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "下载成功，但结果序列化失败: " + err.Error()}}, IsError: true}
 	}
 	return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: string(data)}}}
+}
+
+// handleTestFeishuDownload 处理测试飞书图片下载
+func (s *AppServer) handleTestFeishuDownload(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 测试飞书图片下载")
+
+	// 解析参数
+	fileTokensInterface, _ := args["file_tokens"].([]interface{})
+	accessToken, _ := args["access_token"].(string)
+
+	var fileTokens []string
+	for _, token := range fileTokensInterface {
+		if tokenStr, ok := token.(string); ok {
+			fileTokens = append(fileTokens, tokenStr)
+		}
+	}
+
+	if len(fileTokens) == 0 {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "测试失败: 需要提供 file_tokens 列表",
+			}},
+			IsError: true,
+		}
+	}
+
+	if accessToken == "" {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "测试失败: 需要提供 access_token",
+			}},
+			IsError: true,
+		}
+	}
+
+	logrus.Infof("MCP: 测试飞书下载 - file_token数量: %d", len(fileTokens))
+
+	// 使用 downloader 包下载飞书图片
+	processor := downloader.NewImageProcessor()
+	localPaths, err := processor.ProcessImagesWithFeishuToken(fileTokens, accessToken)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "测试失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 构建返回结果
+	result := map[string]interface{}{
+		"success":      true,
+		"file_tokens":  fileTokens,
+		"local_paths":  localPaths,
+		"downloaded_count": len(localPaths),
+	}
+
+	jsonData, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "下载成功，但结果序列化失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: string(jsonData),
+		}},
+	}
 }
 
 // handleLikeFeed 处理点赞/取消点赞
@@ -1487,6 +1571,142 @@ func (s *AppServer) handleGenerateCoverImage(ctx context.Context, args map[strin
 			Content: []MCPContent{{
 				Type: "text",
 				Text: "生成封面图片成功，但结果序列化失败: " + err.Error(),
+			}},
+			IsError: true,
+		}
+	}
+
+	return &MCPToolResult{
+		Content: []MCPContent{{
+			Type: "text",
+			Text: string(jsonData),
+		}},
+	}
+}
+
+// handleSaveBase64Image 处理保存Base64图片请求
+func (s *AppServer) handleSaveBase64Image(ctx context.Context, args map[string]interface{}) *MCPToolResult {
+	logrus.Info("MCP: 保存Base64图片")
+
+	// 获取参数
+	base64Data, ok := args["base64_data"].(string)
+	if !ok || base64Data == "" {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: "错误: base64_data参数不能为空",
+			}},
+			IsError: true,
+		}
+	}
+
+	outputPath, _ := args["output_path"].(string)
+	extension, _ := args["extension"].(string)
+
+	// 处理Base64数据，移除可能的前缀（如 data:image/png;base64,）
+	base64Str := base64Data
+	if strings.Contains(base64Str, ",") {
+		parts := strings.Split(base64Str, ",")
+		if len(parts) == 2 {
+			base64Str = parts[1]
+			// 尝试从前缀中提取扩展名
+			if extension == "" {
+				prefix := strings.ToLower(parts[0])
+				if strings.Contains(prefix, "image/png") {
+					extension = "png"
+				} else if strings.Contains(prefix, "image/jpeg") || strings.Contains(prefix, "image/jpg") {
+					extension = "jpg"
+				} else if strings.Contains(prefix, "image/gif") {
+					extension = "gif"
+				} else if strings.Contains(prefix, "image/webp") {
+					extension = "webp"
+				}
+			}
+		}
+	}
+
+	// 解码Base64数据
+	imageData, err := base64.StdEncoding.DecodeString(base64Str)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("Base64解码失败: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 如果未指定扩展名，尝试从图片数据中检测
+	if extension == "" {
+		_, format, err := image.DecodeConfig(bytes.NewReader(imageData))
+		if err == nil {
+			extension = format
+		} else {
+			// 如果无法检测，默认使用png
+			extension = "png"
+			logrus.Warnf("无法检测图片格式，使用默认格式: png")
+		}
+	}
+
+	// 规范化扩展名（转换为小写，移除点号）
+	extension = strings.ToLower(strings.TrimPrefix(extension, "."))
+	if extension == "jpeg" {
+		extension = "jpg"
+	}
+
+	// 生成输出路径
+	if outputPath == "" {
+		// 使用generateUniqueFileNameGlobal生成唯一文件名
+		filename := generateUniqueFileNameGlobal("base64_image", extension)
+		outputPath = filepath.Join("saved_images", filename)
+	}
+
+	// 确保输出目录存在
+	outputDir := filepath.Dir(outputPath)
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("创建输出目录失败: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 保存文件
+	if err := os.WriteFile(outputPath, imageData, 0644); err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("保存图片失败: %v", err),
+			}},
+			IsError: true,
+		}
+	}
+
+	// 转换为绝对路径
+	absPath, err := filepath.Abs(outputPath)
+	if err != nil {
+		logrus.Errorf("转换绝对路径失败，路径: %s, 错误: %v", outputPath, err)
+		absPath = outputPath
+	}
+
+	logrus.Infof("Base64图片保存成功: %s (绝对路径: %s)", outputPath, absPath)
+
+	// 返回结果
+	result := map[string]interface{}{
+		"success":   true,
+		"image_path": absPath,
+		"message":   "Base64图片保存成功",
+	}
+
+	jsonData, err := json.Marshal(result)
+	if err != nil {
+		return &MCPToolResult{
+			Content: []MCPContent{{
+				Type: "text",
+				Text: fmt.Sprintf("序列化结果失败: %v", err),
 			}},
 			IsError: true,
 		}
